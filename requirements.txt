@@ -1,0 +1,5 @@
+streamlit
+rdkit
+meeko
+stmol
+py3Dmol
