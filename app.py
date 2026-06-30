@@ -4,6 +4,7 @@ import requests
 from Bio.PDB import PDBParser, PDBIO, Select
 from rdkit import Chem
 from rdkit.Chem import Descriptors, Lipinski
+from rdkit.Geometry import Point3D
 import streamlit.components.v1 as components
 import time
 
@@ -69,24 +70,21 @@ def parse_2d_topology(pdb_text):
     }
 
 def calculate_simulation_docking(pdb_id, smiles, pdb_text, ligand_props):
-    """Simulates realistic docking scores and pulls true amino acids out of the PDB structure."""
-    # Create a unique numeric seed value based on text string characteristics
+    """Simulates realistic docking scores and dynamic microenvironment profiles."""
     combined_seed = sum(ord(char) for char in f"{pdb_id.upper()}_{smiles}")
     
-    # Calculate a variable binding affinity based on properties (ranging between -5.5 and -10.5)
+    # Calculate a variable binding affinity based on properties
     base_score = -6.8 - (combined_seed % 20) / 10.0
     if ligand_props:
-        # Heavily integrated property effects: larger molecules change affinity distributions
         base_score -= (ligand_props.get("Molecular Weight (g/mol)", 150) % 15) / 10.0
     base_score = round(base_score, 1)
     
-    # Generate decaying conformer pose affinity distributions
     energies = [base_score]
     for i in range(1, 5):
         next_val = round(energies[-1] + 0.3 + (combined_seed % (i + 2)) * 0.1, 1)
         energies.append(next_val)
         
-    # Look through raw PDB coordinate records to isolate authentic amino acid environments
+    # Extract authentic amino acid environments from the PDB structure
     true_residues = []
     for line in pdb_text.splitlines():
         if line.startswith("ATOM  ") and line[12:16].strip() == "CA":
@@ -98,14 +96,35 @@ def calculate_simulation_docking(pdb_id, smiles, pdb_text, ligand_props):
             if len(true_residues) >= 4:
                 break
                 
-    # Fallback padding if data reading hit unexpected boundaries
     while len(true_residues) < 4:
         true_residues.append(f"Res{100 + len(true_residues)}")
-        
-    return base_score, energies, true_residues
 
-def render_3d_viewer(pdb_str, ligand_smiles=None, style="cartoon", element_id="container"):
-    """Generates an inline HTML/JS canvas containing py3Dmol for 3D visualization."""
+    # Generate Dynamic Microenvironment vectors mapped to the seed
+    vectors_pool = ["Hydrogen Bond", "Pi-Pi Stacking", "Van der Waals", "Salt Bridge", "Cation-Pi", "Hydrophobic"]
+    summaries_pool = [
+        "Strong electrostatic localization to ligand donor group.",
+        "Aromatic structural pairing to ligand framework.",
+        "Hydrophobic binding pocket envelope contact optimization.",
+        "Ionic stabilization across receptor cavity.",
+        "Cationic pairing with electron-rich ligand rings.",
+        "Non-polar surface area burial interaction."
+    ]
+    
+    interactions = []
+    distances = []
+    func_summaries = []
+    
+    for i in range(4):
+        idx = (combined_seed + i * 3) % len(vectors_pool)
+        interactions.append(vectors_pool[idx])
+        func_summaries.append(summaries_pool[idx])
+        dist = round(2.4 + ((combined_seed * (i + 1)) % 20) / 10.0, 2)
+        distances.append(dist)
+        
+    return base_score, energies, true_residues, interactions, distances, func_summaries
+
+def render_3d_viewer(pdb_str, ligand_smiles=None, style="cartoon", element_id="container", grid_center=None):
+    """Generates an inline HTML canvas containing py3Dmol for 3D visualization and dynamically offsets ligand."""
     style_opts = f"{{ {style}: {{color: 'spectrum'}} }}"
     
     ligand_js = ""
@@ -114,7 +133,29 @@ def render_3d_viewer(pdb_str, ligand_smiles=None, style="cartoon", element_id="c
         if mol:
             mol = Chem.AddHs(mol)
             from rdkit.Chem import AllChem
-            AllChem.EmbedMolecule(mol)
+            # Embed ligand into 3D space
+            AllChem.EmbedMolecule(mol, randomSeed=42)
+            
+            # Translate ligand to fit securely inside the targeted protein grid
+            if grid_center:
+                conf = mol.GetConformer()
+                num_atoms = mol.GetNumAtoms()
+                
+                # Calculate current spatial center of mass
+                cx = sum(conf.GetAtomPosition(i).x for i in range(num_atoms)) / num_atoms
+                cy = sum(conf.GetAtomPosition(i).y for i in range(num_atoms)) / num_atoms
+                cz = sum(conf.GetAtomPosition(i).z for i in range(num_atoms)) / num_atoms
+                
+                # Calculate required spatial shift
+                dx = grid_center[0] - cx
+                dy = grid_center[1] - cy
+                dz = grid_center[2] - cz
+                
+                # Move all atoms to new docking site
+                for i in range(num_atoms):
+                    pos = conf.GetAtomPosition(i)
+                    conf.SetAtomPosition(i, Point3D(pos.x + dx, pos.y + dy, pos.z + dz))
+
             mol_block = Chem.MolToMolBlock(mol)
             cleaned_block = mol_block.replace('\n', '\\n').replace('\r', '')
             ligand_js = f"""
@@ -307,9 +348,21 @@ else:
         st.success("Docking calculation runs resolved completely!")
         
         # --- CALCULATE DYNAMIC RESULTS ON EXECUTION ---
-        top_score, pose_energies, active_residues = calculate_simulation_docking(
+        top_score, pose_energies, active_res, int_types, dists, summaries = calculate_simulation_docking(
             pdb_id, st.session_state.smiles, st.session_state.pdb_text, st.session_state.ligand_props
         )
+        
+        # Evaluate Lipinski Compliance Dynamically
+        violations = 0
+        if st.session_state.ligand_props:
+            lp = st.session_state.ligand_props
+            if lp["Molecular Weight (g/mol)"] > 500: violations += 1
+            if lp["LogP (Partition Coefficient)"] > 5: violations += 1
+            if lp["Hydrogen Bond Donors"] > 5: violations += 1
+            if lp["Hydrogen Bond Acceptors"] > 10: violations += 1
+            
+        lipinski_status = "Yes (0 Violations)" if violations == 0 else f"No ({violations} Violations)"
+        runtime = round(4.0 + (exhaustiveness * 0.18) + (len(st.session_state.smiles) % 5), 2)
         
         # --- RESULTS INTERFACE CARD ---
         st.markdown("## 📊 Comprehensive Docking Run Results")
@@ -329,25 +382,28 @@ else:
             
             st.subheader("Microenvironment Interaction Analysis")
             interaction_data = {
-                "Residue Assigned": active_residues,
-                "Interaction Vector": ["Hydrogen Bond", "Pi-Pi Stacking", "Hydrogen Bond", "Van der Waals"],
-                "Distance (Å)": [2.85, 3.42, 2.91, 3.74],
-                "Functional Mechanical Summary": [
-                    "Strong electrostatic localization to ligand amine donor group.",
-                    "Aromatic structural pairing to ligand phenyl framework.",
-                    "Phenolic hydroxyl coordination stabilization interaction.",
-                    "Hydrophobic binding pocket envelope contact optimization."
-                ]
+                "Residue Assigned": active_res,
+                "Interaction Vector": int_types,
+                "Distance (Å)": dists,
+                "Functional Mechanical Summary": summaries
             }
             st.table(pd.DataFrame(interaction_data))
 
         with res_c2:
             st.subheader("Conformer Pose Spatial Viewer")
-            render_3d_viewer(st.session_state.pure_protein, ligand_smiles=st.session_state.smiles, style="cartoon", element_id="result_viewer")
+            # Pass the grid coordinates directly into the 3D Viewer function so the ligand translates to the pocket
+            docking_grid_center = (center_x, center_y, center_z)
+            render_3d_viewer(
+                st.session_state.pure_protein, 
+                ligand_smiles=st.session_state.smiles, 
+                style="cartoon", 
+                element_id="result_viewer",
+                grid_center=docking_grid_center
+            )
             
             st.subheader("Simulation Final Summary")
             summary_metrics = {
                 "Parameter Setting": ["Target System Identifier", "Grid Volumetric Center", "Total Iteration Runtime", "Lipinski Compliant Ligand"],
-                "Value Profile": [f"PDB: {pdb_id.upper()}", f"[{center_x}, {center_y}, {center_z}]", "4.82 Seconds", "Yes (0 Violations)"]
+                "Value Profile": [f"PDB: {pdb_id.upper()}", f"[{center_x}, {center_y}, {center_z}]", f"{runtime} Seconds", lipinski_status]
             }
             st.table(pd.DataFrame(summary_metrics))
