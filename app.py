@@ -1,10 +1,11 @@
+
 import streamlit as st
 import pandas as pd
 import requests
 import math
 from Bio.PDB import PDBParser, PDBIO, Select
 from rdkit import Chem
-from rdkit.Chem import Descriptors, Lipinski, Draw
+from rdkit.Chem import Descriptors, Lipinski
 from rdkit.Geometry import Point3D
 import streamlit.components.v1 as components
 import time
@@ -134,7 +135,7 @@ def calculate_simulation_docking(pdb_id, smiles, pdb_text, ligand_props, strateg
     strategy_mods = {
         "Scan Cavity (Active Site Boundary Box)": (0, 0.0, 0.0, 0),
         "Target Heteroatoms / Crystallographic Ligand": (137, -1.8, -0.4, 25), 
-        "Blind Global Docking Whole Surface": (251, +2.4, +1.2, 80)            
+        "Blind Global Docking Whole Surface": (251, +2.4, +1.2, 80)           
     }
     
     strat_seed_add, strat_score_mod, strat_dist_mod, residue_skip = strategy_mods.get(strategy, (0, 0.0, 0.0, 0))
@@ -253,7 +254,7 @@ def render_3d_viewer(pdb_str, ligand_smiles=None, style="cartoon", element_id="c
             mol_block = Chem.MolToMolBlock(mol)
             cleaned_block = mol_block.replace('\n', '\\n').replace('\r', '')
             ligand_js = f"""
-            var ligand_mol = msv.addModel({cleaned_block}, "sdf");
+            var ligand_mol = msv.addModel(`{cleaned_block}`, "sdf");
             msv.setStyle({{model: ligand_mol}}, {{stick: {{colorscheme: 'cyanCarbon', radius: 0.15}} }});
             """
 
@@ -265,7 +266,7 @@ def render_3d_viewer(pdb_str, ligand_smiles=None, style="cartoon", element_id="c
     <script>
         var element = document.getElementById('{element_id}');
         var msv = $3Dmol.createViewer(element, {{backgroundColor: '#111217'}});
-        var protein_mol = msv.addModel({cleaned_pdb}, "pdb");
+        var protein_mol = msv.addModel(`{cleaned_pdb}`, "pdb");
         msv.setStyle({{model: protein_mol}}, {style_opts});
         {ligand_js}
         msv.zoomTo();
@@ -331,7 +332,7 @@ if st.session_state.pdb_text:
     
     with c2:
         st.subheader("Sanitized Pure Protein")
-        st.markdown("Heteroatoms, waters, and co-factors removed")
+        st.markdown("*Heteroatoms, waters, and co-factors removed*")
         render_3d_viewer(st.session_state.pure_protein, style=render_mode, element_id="pure_viewer")
         st.download_button(
             label="📥 Download Prepared PDBQT File",
@@ -349,7 +350,7 @@ if st.session_state.pdb_text:
         st.subheader("2D Sequence Topology Diagram")
         if st.session_state.topology_graph:
             # Rendering via Native Streamlit Markdown (Mermaid)
-            st.markdown(f"mermaid\n{st.session_state.topology_graph}\n")
+            st.markdown(f"```mermaid\n{st.session_state.topology_graph}\n```")
         else:
             st.info("No secondary structures configured to display.")
             
@@ -397,12 +398,6 @@ with col_l1:
 
 with col_l2:
     if st.session_state.ligand_props:
-        st.subheader("2D Ligand Topology")
-        if 'mol' in locals() and mol:
-            # RDKit will natively generate the visual structural graph you're looking for
-            img = Draw.MolToImage(mol, size=(400, 300))
-            st.image(img, caption="Chemical Structure Graph", use_container_width=True)
-
         st.subheader("Calculated Molecular Parameters")
         prop_df = pd.DataFrame(st.session_state.ligand_props.items(), columns=["Molecular Property", "Value"])
         st.table(prop_df)
@@ -522,3 +517,5 @@ else:
                 "Value Profile": [f"PDB: {pdb_id.upper()}", grid_strategy.split(" (")[0].split(" /")[0], f"{runtime} Seconds", lipinski_status]
             }
             st.table(pd.DataFrame(summary_metrics))
+
+
