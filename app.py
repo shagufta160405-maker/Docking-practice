@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import requests
+import math
 from Bio.PDB import PDBParser, PDBIO, Select
 from rdkit import Chem
 from rdkit.Chem import Descriptors, Lipinski
@@ -69,12 +70,12 @@ def parse_2d_topology(pdb_text):
         "Total Computed Residues": len(total_residues)
     }
 
-def generate_topology_graph(pdb_text):
-    """Generates a Graphviz DOT string to visualize 2D secondary structure sequence."""
+def generate_topology_mermaid(pdb_text):
+    """Generates a Mermaid.js string to visualize 2D secondary structure natively in Streamlit."""
     elements = []
     current_chain = None
     
-    # Parse HELIX and SHEET records to get start and end residue positions
+    # Parse HELIX and SHEET records
     for line in pdb_text.splitlines():
         if line.startswith("HELIX"):
             chain = line[19].strip()
@@ -82,16 +83,15 @@ def generate_topology_graph(pdb_text):
             if chain == current_chain:
                 start = line[21:25].strip()
                 end = line[33:37].strip()
-                elements.append({"type": "Alpha Helix", "start": start, "end": end, "color": '"#ff9999"'})
+                elements.append({"type": "Alpha Helix", "start": start, "end": end})
         elif line.startswith("SHEET"):
             chain = line[21].strip()
             if current_chain is None: current_chain = chain
             if chain == current_chain:
                 start = line[22:26].strip()
                 end = line[33:37].strip()
-                elements.append({"type": "Beta Sheet", "start": start, "end": end, "color": '"#99ccff"'})
+                elements.append({"type": "Beta Sheet", "start": start, "end": end})
                 
-    # Sort topologically by starting residue number
     try:
         elements.sort(key=lambda x: int(x['start']))
     except ValueError:
@@ -100,47 +100,54 @@ def generate_topology_graph(pdb_text):
     if not elements:
         return None
         
-    # Limit to the first 8 structural elements to prevent graph clutter
     display_elements = elements[:8]
     
-    # Build the DOT string layout
-    dot = 'digraph Topology {\nrankdir=LR;\nbgcolor="transparent";\nnode [shape=box, style="filled,rounded", fontname="Arial", fontsize=10];\n'
-    dot += 'edge [color="#666666", penwidth=1.5, arrowsize=0.8];\n'
-    
+    # Build Mermaid syntax string
+    mermaid_str = "graph LR\n"
     for i, el in enumerate(display_elements):
-        label = f"{el['type']}\\nRes {el['start']}-{el['end']}"
-        dot += f'  N{i} [label="{label}", fillcolor={el["color"]}, color="#333333"];\n'
+        # Different shapes for Helix vs Sheet
+        shape_start = "([" if el['type'] == "Alpha Helix" else "["
+        shape_end = "])" if el['type'] == "Alpha Helix" else "]"
+        
+        mermaid_str += f"  N{i}{shape_start}{el['type']}<br>Res {el['start']}-{el['end']}{shape_end}\n"
         if i > 0:
-            dot += f'  N{i-1} -> N{i};\n'
+            mermaid_str += f"  N{i-1} --> N{i}\n"
             
     if len(elements) > 8:
-        dot += f'  N_more [label="... {len(elements)-8} more\\nstructures", fillcolor="#e0e0e0", color="#333333"];\n'
-        dot += f'  N{len(display_elements)-1} -> N_more;\n'
+        mermaid_str += f"  N_more[[... {len(elements)-8} more structures]]\n"
+        mermaid_str += f"  N{len(display_elements)-1} -.-> N_more\n"
         
-    dot += '}'
-    return dot
+    # CSS Styling embedded in Mermaid
+    mermaid_str += "  classDef helix fill:#ffb3b3,stroke:#cc0000,stroke-width:2px,color:black;\n"
+    mermaid_str += "  classDef sheet fill:#b3d9ff,stroke:#0066cc,stroke-width:2px,color:black;\n"
+    
+    for i, el in enumerate(display_elements):
+        c_name = "helix" if el['type'] == "Alpha Helix" else "sheet"
+        mermaid_str += f"  class N{i} {c_name};\n"
+        
+    return mermaid_str
 
 def calculate_simulation_docking(pdb_id, smiles, pdb_text, ligand_props, strategy):
     """Simulates realistic docking scores heavily weighted by chosen grid strategy."""
     
-    # Strategy matrix: Affects seed generation and affinity scoring logic
-    # Format: (Seed Multiplier, Score Offset, Distance Offset)
+    # Flat additive modifiers to prevent modulo collisions (guarantees different text/residues)
     strategy_mods = {
-        "Scan Cavity (Active Site Boundary Box)": (1, 0.0, 0.0),
-        "Target Heteroatoms / Crystallographic Ligand": (7, -1.8, -0.4), # Tighter binding
-        "Blind Global Docking Whole Surface": (13, +2.4, +1.2)           # Weaker, broader binding
+        "Scan Cavity (Active Site Boundary Box)": (0, 0.0, 0.0, 0),
+        "Target Heteroatoms / Crystallographic Ligand": (137, -1.8, -0.4, 25), 
+        "Blind Global Docking Whole Surface": (251, +2.4, +1.2, 80)           
     }
     
-    strat_mult, strat_score_mod, strat_dist_mod = strategy_mods.get(strategy, (1, 0.0, 0.0))
+    strat_seed_add, strat_score_mod, strat_dist_mod, residue_skip = strategy_mods.get(strategy, (0, 0.0, 0.0, 0))
     
-    combined_seed = (sum(ord(char) for char in f"{pdb_id.upper()}_{smiles}") * strat_mult)
+    # Base seed calculation
+    base_seed = sum(ord(char) for char in f"{pdb_id.upper()}_{smiles}")
+    combined_seed = base_seed + strat_seed_add
     
     # Calculate variable binding affinity
     base_score = -6.8 - (combined_seed % 20) / 10.0
     if ligand_props:
         base_score -= (ligand_props.get("Molecular Weight (g/mol)", 150) % 15) / 10.0
         
-    # Apply strategy specific adjustments
     base_score += strat_score_mod
     base_score = round(base_score, 1)
     
@@ -149,15 +156,14 @@ def calculate_simulation_docking(pdb_id, smiles, pdb_text, ligand_props, strateg
         next_val = round(energies[-1] + 0.3 + (combined_seed % (i + 2)) * 0.1, 1)
         energies.append(next_val)
         
-    # Extract authentic amino acid environments based on strategy offset
+    # Extract authentic amino acid environments based on strategy skip offset
     true_residues = []
-    skip_lines = (strat_mult * 25) % 100 # Change which part of the protein we "dock" to
     current_skip = 0
     
     for line in pdb_text.splitlines():
         if line.startswith("ATOM  ") and line[12:16].strip() == "CA":
             current_skip += 1
-            if current_skip < skip_lines: 
+            if current_skip < residue_skip: 
                 continue
             res_name = line[17:20].strip().title()
             res_number = line[22:26].strip()
@@ -170,7 +176,6 @@ def calculate_simulation_docking(pdb_id, smiles, pdb_text, ligand_props, strateg
     while len(true_residues) < 4:
         true_residues.append(f"Res{100 + len(true_residues)}")
 
-    # Generate Dynamic Microenvironment vectors
     vectors_pool = ["Hydrogen Bond", "Pi-Pi Stacking", "Van der Waals", "Salt Bridge", "Cation-Pi", "Hydrophobic"]
     summaries_pool = [
         "Strong electrostatic localization to ligand donor group.",
@@ -186,17 +191,18 @@ def calculate_simulation_docking(pdb_id, smiles, pdb_text, ligand_props, strateg
     func_summaries = []
     
     for i in range(4):
+        # Now yields totally different indices based on the active strategy
         idx = (combined_seed + i * 3) % len(vectors_pool)
         interactions.append(vectors_pool[idx])
         func_summaries.append(summaries_pool[idx])
-        # Calculate distance and apply strategy distance modifiers (tighter for targeted, looser for blind)
+        
         dist = round(2.8 + ((combined_seed * (i + 1)) % 15) / 10.0 + strat_dist_mod, 2)
-        dist = max(1.8, dist) # Prevent physically impossible atomic overlap
+        dist = max(1.8, dist) 
         distances.append(dist)
         
     return base_score, energies, true_residues, interactions, distances, func_summaries
 
-def render_3d_viewer(pdb_str, ligand_smiles=None, style="cartoon", element_id="container", grid_center=None):
+def render_3d_viewer(pdb_str, ligand_smiles=None, style="cartoon", element_id="container", grid_center=None, pose_idx=1):
     """Generates an inline HTML canvas containing py3Dmol for 3D visualization and dynamically offsets ligand."""
     style_opts = f"{{ {style}: {{color: 'spectrum'}} }}"
     
@@ -206,34 +212,49 @@ def render_3d_viewer(pdb_str, ligand_smiles=None, style="cartoon", element_id="c
         if mol:
             mol = Chem.AddHs(mol)
             from rdkit.Chem import AllChem
-            # Embed ligand into 3D space
             AllChem.EmbedMolecule(mol, randomSeed=42)
             
-            # Translate ligand to fit securely inside the targeted protein grid
             if grid_center:
                 conf = mol.GetConformer()
                 num_atoms = mol.GetNumAtoms()
                 
-                # Calculate current spatial center of mass
+                # Base spatial center
                 cx = sum(conf.GetAtomPosition(i).x for i in range(num_atoms)) / num_atoms
                 cy = sum(conf.GetAtomPosition(i).y for i in range(num_atoms)) / num_atoms
                 cz = sum(conf.GetAtomPosition(i).z for i in range(num_atoms)) / num_atoms
                 
-                # Calculate required spatial shift
+                # Grid translation
                 dx = grid_center[0] - cx
                 dy = grid_center[1] - cy
                 dz = grid_center[2] - cz
                 
-                # Move all atoms to new docking site
+                # Dynamic Pose Mathematics (Shifts and rotates the molecule based on pose selection)
+                pose_shift_x = (pose_idx - 1) * 2.5 * (-1 if pose_idx % 2 == 0 else 1)
+                pose_shift_y = (pose_idx - 1) * 1.8
+                pose_shift_z = (pose_idx - 1) * 2.2 * (-1 if pose_idx % 3 == 0 else 1)
+
+                angle = (pose_idx - 1) * (math.pi / 3) # Rotate ~60 degrees per pose index
+                cos_a = math.cos(angle)
+                sin_a = math.sin(angle)
+                
                 for i in range(num_atoms):
                     pos = conf.GetAtomPosition(i)
-                    conf.SetAtomPosition(i, Point3D(pos.x + dx, pos.y + dy, pos.z + dz))
+                    # Shift to local origin
+                    ox = pos.x - cx
+                    oy = pos.y - cy
+                    oz = pos.z - cz
+                    # Rotate on Z/Y axes
+                    rx = ox * cos_a - oy * sin_a
+                    ry = ox * sin_a + oy * cos_a
+                    rz = oz
+                    # Translate to grid + apply pose offset
+                    conf.SetAtomPosition(i, Point3D(rx + cx + dx + pose_shift_x, ry + cy + dy + pose_shift_y, rz + cz + dz + pose_shift_z))
 
             mol_block = Chem.MolToMolBlock(mol)
             cleaned_block = mol_block.replace('\n', '\\n').replace('\r', '')
             ligand_js = f"""
             var ligand_mol = msv.addModel(`{cleaned_block}`, "sdf");
-            msv.setStyle({{model: ligand_mol}}, {{stick: {{colorscheme: 'cyanCarbon'}} }});
+            msv.setStyle({{model: ligand_mol}}, {{stick: {{colorscheme: 'cyanCarbon', radius: 0.15}} }});
             """
 
     cleaned_pdb = pdb_str.replace('\n', '\\n').replace('\r', '')
@@ -283,9 +304,9 @@ with col1:
             if raw_text:
                 st.session_state.pdb_text = raw_text
                 st.session_state.topology_data = parse_2d_topology(raw_text)
-                st.session_state.topology_graph = generate_topology_graph(raw_text)
+                # Generate Mermaid.js native diagram
+                st.session_state.topology_graph = generate_topology_mermaid(raw_text)
                 
-                # Convert to "Pure Protein" (Strip HETATMs)
                 parser = PDBParser(QUIET=True)
                 from io import StringIO
                 pdb_fh = StringIO(raw_text)
@@ -325,10 +346,10 @@ if st.session_state.pdb_text:
             topo_df = pd.DataFrame(st.session_state.topology_data.items(), columns=["Structural Feature", "Value"])
             st.dataframe(topo_df, use_container_width=True, hide_index=True)
             
-        st.subheader("2D Structural Diagram")
+        st.subheader("2D Sequence Topology Diagram")
         if st.session_state.topology_graph:
-            # Renders the Graphviz directional node structure dynamically
-            st.graphviz_chart(st.session_state.topology_graph)
+            # Rendering via Native Streamlit Markdown (Mermaid)
+            st.markdown(f"```mermaid\n{st.session_state.topology_graph}\n```")
         else:
             st.info("No secondary structures configured to display.")
             
@@ -418,7 +439,7 @@ else:
         status_text = st.empty()
         
         for percent_complete in range(100):
-            time.sleep(0.01)  # Simulated performance loops
+            time.sleep(0.01) 
             progress_bar.progress(percent_complete + 1)
             if percent_complete < 30:
                 status_text.text("Generating rigid receptor grids...")
@@ -427,15 +448,16 @@ else:
             else:
                 status_text.text("Sorting lowest free energy confirmations...")
         
+        st.session_state.docking_complete = True
         st.success("Docking calculation runs resolved completely!")
+
+    # Check session state to persist results visually while allowing interaction with the SelectBox
+    if st.session_state.get('docking_complete', False):
         
-        # --- CALCULATE DYNAMIC RESULTS ON EXECUTION ---
-        # We now pass `grid_strategy` into the function so it changes the generated scores/residues
         top_score, pose_energies, active_res, int_types, dists, summaries = calculate_simulation_docking(
             pdb_id, st.session_state.smiles, st.session_state.pdb_text, st.session_state.ligand_props, grid_strategy
         )
         
-        # Evaluate Lipinski Compliance Dynamically
         violations = 0
         if st.session_state.ligand_props:
             lp = st.session_state.ligand_props
@@ -447,7 +469,6 @@ else:
         lipinski_status = "Yes (0 Violations)" if violations == 0 else f"No ({violations} Violations)"
         runtime = round(4.0 + (exhaustiveness * 0.18) + (len(st.session_state.smiles) % 5), 2)
         
-        # --- RESULTS INTERFACE CARD ---
         st.markdown("## 📊 Comprehensive Docking Run Results")
         res_c1, res_c2 = st.columns([1, 1])
         
@@ -474,19 +495,24 @@ else:
 
         with res_c2:
             st.subheader("Conformer Pose Spatial Viewer")
-            # Pass the grid coordinates directly into the 3D Viewer function so the ligand translates to the pocket
+            
+            # Interactive Pose Selector Dropdown
+            selected_pose = st.selectbox("Select Generated Pose to Visualize", [1, 2, 3, 4, 5], key="pose_selector")
+            
+            # Re-render 3D viewer dynamically based on selected pose
             docking_grid_center = (center_x, center_y, center_z)
             render_3d_viewer(
                 st.session_state.pure_protein, 
                 ligand_smiles=st.session_state.smiles, 
                 style="cartoon", 
                 element_id="result_viewer",
-                grid_center=docking_grid_center
+                grid_center=docking_grid_center,
+                pose_idx=selected_pose
             )
             
             st.subheader("Simulation Final Summary")
             summary_metrics = {
-                "Parameter Setting": ["Target System Identifier", "Grid Strategy", "Total Iteration Runtime", "Lipinski Compliant Ligand"],
-                "Value Profile": [f"PDB: {pdb_id.upper()}", grid_strategy.split(" (")[0], f"{runtime} Seconds", lipinski_status]
+                "Parameter Setting": ["Target System Identifier", "Grid Strategy Executed", "Total Iteration Runtime", "Lipinski Compliant Ligand"],
+                "Value Profile": [f"PDB: {pdb_id.upper()}", grid_strategy.split(" (")[0].split(" /")[0], f"{runtime} Seconds", lipinski_status]
             }
             st.table(pd.DataFrame(summary_metrics))
