@@ -23,42 +23,35 @@ class NonHeteroSelect(Select):
     def accept_residue(self, residue): return residue.get_id()[0] == " "
 
 def generate_ligand_2d(smiles):
-    """Generates a 2D chemical structure image from SMILES."""
+    """Generates a 2D chemical structure image safely using Pillow."""
     mol = Chem.MolFromSmiles(smiles)
     if mol:
+        # Use MolToImage instead of rdMolDraw2D to avoid dependency errors
         img = Draw.MolToImage(mol)
         return img
     return None
 
 def calculate_simulation_docking(pdb_id, smiles, strategy):
-    """Calculates distinct docking metrics based on the strategy selection."""
-    # Unique seeds per strategy to ensure different outputs
     seeds = {"Scan Cavity (Active Site Boundary Box)": 10, "Target Heteroatoms / Crystallographic Ligand": 20, "Blind Global Docking Whole Surface": 30}
     seed = seeds.get(strategy, 5)
-    
     base_score = -6.0 - (seed / 10)
     energies = [round(base_score + (i * 0.4), 2) for i in range(5)]
-    
-    # Interaction data varies by strategy
     interactions = [["H-Bond", "Van der Waals", "Pi-Stacking"][i % 3] for i in range(4)]
     distances = [round(2.5 + (seed * 0.01) + (i * 0.3), 2) for i in range(4)]
-    summaries = [f"Interaction type {i+1} optimized for {strategy.split(' ')[0]} mode." for i in range(4)]
-    
+    summaries = [f"Interaction {i+1} optimized for {strategy.split(' ')[0]} mode." for i in range(4)]
     return base_score, energies, interactions, distances, summaries
 
 def render_3d_viewer(pdb_str, ligand_smiles=None, style="cartoon", element_id="container", pose_idx=1):
-    """Displays 3D structure and allows pose-based spatial transformation."""
     ligand_js = ""
     if ligand_smiles:
         mol = Chem.AddHs(Chem.MolFromSmiles(ligand_smiles))
         from rdkit.Chem import AllChem
-        AllChem.EmbedMolecule(mol, randomSeed=pose_idx) # Seed changes based on pose
+        AllChem.EmbedMolecule(mol, randomSeed=pose_idx)
         mol_block = Chem.MolToMolBlock(mol).replace('\n', '\\n').replace('\r', '')
         ligand_js = f"""
             var ligand_mol = msv.addModel(`{mol_block}`, "sdf");
             msv.setStyle({{model: ligand_mol}}, {{stick: {{colorscheme: 'cyanCarbon'}} }});
         """
-
     cleaned_pdb = pdb_str.replace('\n', '\\n').replace('\r', '')
     html = f"""
     <div id="{element_id}" style="height: 400px; width: 100%;"></div>
@@ -77,6 +70,7 @@ def render_3d_viewer(pdb_str, ligand_smiles=None, style="cartoon", element_id="c
 st.title("🧬 Docking Workspace")
 
 if 'pdb_text' not in st.session_state: st.session_state.pdb_text = None
+if 'smiles' not in st.session_state: st.session_state.smiles = "CC(=O)NC1=CC=C(O)C=C1"
 
 # Phase 1
 st.header("📍 Phase 1: Structure & 2D Diagram")
@@ -90,15 +84,15 @@ if st.session_state.pdb_text:
         render_3d_viewer(st.session_state.pdb_text, element_id="p1")
     with col2:
         st.subheader("Ligand 2D Structure")
-        if st.session_state.get('smiles'):
-            img = generate_ligand_2d(st.session_state.smiles)
+        img = generate_ligand_2d(st.session_state.smiles)
+        if img:
             st.image(img, caption="Ligand 2D Representation")
         else:
-            st.info("Input SMILES in Phase 2 to view 2D structure.")
+            st.info("Invalid SMILES input.")
 
 # Phase 2
 st.header("💊 Phase 2: Ligand Setup")
-smiles_in = st.text_input("SMILES:", value="CC(=O)NC1=CC=C(O)C=C1")
+smiles_in = st.text_input("SMILES:", value=st.session_state.smiles)
 st.session_state.smiles = smiles_in
 
 # Phase 3
@@ -111,13 +105,7 @@ if st.button("Run Docking"):
 
 if st.session_state.get('docking_done'):
     score, energies, ints, dists, summaries = st.session_state.results
-    
     st.subheader("Results")
     pose = st.selectbox("Select Pose to View:", [1, 2, 3, 4, 5], key="pose_sel")
     render_3d_viewer(st.session_state.pdb_text, ligand_smiles=smiles_in, pose_idx=pose, element_id="p3")
-    
-    st.table(pd.DataFrame({
-        "Interaction": ints,
-        "Distance": dists,
-        "Summary": summaries
-    }))
+    st.table(pd.DataFrame({"Interaction": ints, "Distance": dists, "Summary": summaries}))
