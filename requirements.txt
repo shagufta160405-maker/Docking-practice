@@ -1,5 +1,6 @@
 streamlit
-rdkit
-meeko
+requests
+rdkit-pypi
+biopython
 stmol
 py3Dmol
