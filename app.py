@@ -69,14 +69,79 @@ def parse_2d_topology(pdb_text):
         "Total Computed Residues": len(total_residues)
     }
 
-def calculate_simulation_docking(pdb_id, smiles, pdb_text, ligand_props):
-    """Simulates realistic docking scores and dynamic microenvironment profiles."""
-    combined_seed = sum(ord(char) for char in f"{pdb_id.upper()}_{smiles}")
+def generate_topology_graph(pdb_text):
+    """Generates a Graphviz DOT string to visualize 2D secondary structure sequence."""
+    elements = []
+    current_chain = None
     
-    # Calculate a variable binding affinity based on properties
+    # Parse HELIX and SHEET records to get start and end residue positions
+    for line in pdb_text.splitlines():
+        if line.startswith("HELIX"):
+            chain = line[19].strip()
+            if current_chain is None: current_chain = chain
+            if chain == current_chain:
+                start = line[21:25].strip()
+                end = line[33:37].strip()
+                elements.append({"type": "Alpha Helix", "start": start, "end": end, "color": '"#ff9999"'})
+        elif line.startswith("SHEET"):
+            chain = line[21].strip()
+            if current_chain is None: current_chain = chain
+            if chain == current_chain:
+                start = line[22:26].strip()
+                end = line[33:37].strip()
+                elements.append({"type": "Beta Sheet", "start": start, "end": end, "color": '"#99ccff"'})
+                
+    # Sort topologically by starting residue number
+    try:
+        elements.sort(key=lambda x: int(x['start']))
+    except ValueError:
+        pass
+        
+    if not elements:
+        return None
+        
+    # Limit to the first 8 structural elements to prevent graph clutter
+    display_elements = elements[:8]
+    
+    # Build the DOT string layout
+    dot = 'digraph Topology {\nrankdir=LR;\nbgcolor="transparent";\nnode [shape=box, style="filled,rounded", fontname="Arial", fontsize=10];\n'
+    dot += 'edge [color="#666666", penwidth=1.5, arrowsize=0.8];\n'
+    
+    for i, el in enumerate(display_elements):
+        label = f"{el['type']}\\nRes {el['start']}-{el['end']}"
+        dot += f'  N{i} [label="{label}", fillcolor={el["color"]}, color="#333333"];\n'
+        if i > 0:
+            dot += f'  N{i-1} -> N{i};\n'
+            
+    if len(elements) > 8:
+        dot += f'  N_more [label="... {len(elements)-8} more\\nstructures", fillcolor="#e0e0e0", color="#333333"];\n'
+        dot += f'  N{len(display_elements)-1} -> N_more;\n'
+        
+    dot += '}'
+    return dot
+
+def calculate_simulation_docking(pdb_id, smiles, pdb_text, ligand_props, strategy):
+    """Simulates realistic docking scores heavily weighted by chosen grid strategy."""
+    
+    # Strategy matrix: Affects seed generation and affinity scoring logic
+    # Format: (Seed Multiplier, Score Offset, Distance Offset)
+    strategy_mods = {
+        "Scan Cavity (Active Site Boundary Box)": (1, 0.0, 0.0),
+        "Target Heteroatoms / Crystallographic Ligand": (7, -1.8, -0.4), # Tighter binding
+        "Blind Global Docking Whole Surface": (13, +2.4, +1.2)           # Weaker, broader binding
+    }
+    
+    strat_mult, strat_score_mod, strat_dist_mod = strategy_mods.get(strategy, (1, 0.0, 0.0))
+    
+    combined_seed = (sum(ord(char) for char in f"{pdb_id.upper()}_{smiles}") * strat_mult)
+    
+    # Calculate variable binding affinity
     base_score = -6.8 - (combined_seed % 20) / 10.0
     if ligand_props:
         base_score -= (ligand_props.get("Molecular Weight (g/mol)", 150) % 15) / 10.0
+        
+    # Apply strategy specific adjustments
+    base_score += strat_score_mod
     base_score = round(base_score, 1)
     
     energies = [base_score]
@@ -84,10 +149,16 @@ def calculate_simulation_docking(pdb_id, smiles, pdb_text, ligand_props):
         next_val = round(energies[-1] + 0.3 + (combined_seed % (i + 2)) * 0.1, 1)
         energies.append(next_val)
         
-    # Extract authentic amino acid environments from the PDB structure
+    # Extract authentic amino acid environments based on strategy offset
     true_residues = []
+    skip_lines = (strat_mult * 25) % 100 # Change which part of the protein we "dock" to
+    current_skip = 0
+    
     for line in pdb_text.splitlines():
         if line.startswith("ATOM  ") and line[12:16].strip() == "CA":
+            current_skip += 1
+            if current_skip < skip_lines: 
+                continue
             res_name = line[17:20].strip().title()
             res_number = line[22:26].strip()
             formatted_res = f"{res_name}{res_number}"
@@ -99,7 +170,7 @@ def calculate_simulation_docking(pdb_id, smiles, pdb_text, ligand_props):
     while len(true_residues) < 4:
         true_residues.append(f"Res{100 + len(true_residues)}")
 
-    # Generate Dynamic Microenvironment vectors mapped to the seed
+    # Generate Dynamic Microenvironment vectors
     vectors_pool = ["Hydrogen Bond", "Pi-Pi Stacking", "Van der Waals", "Salt Bridge", "Cation-Pi", "Hydrophobic"]
     summaries_pool = [
         "Strong electrostatic localization to ligand donor group.",
@@ -118,7 +189,9 @@ def calculate_simulation_docking(pdb_id, smiles, pdb_text, ligand_props):
         idx = (combined_seed + i * 3) % len(vectors_pool)
         interactions.append(vectors_pool[idx])
         func_summaries.append(summaries_pool[idx])
-        dist = round(2.4 + ((combined_seed * (i + 1)) % 20) / 10.0, 2)
+        # Calculate distance and apply strategy distance modifiers (tighter for targeted, looser for blind)
+        dist = round(2.8 + ((combined_seed * (i + 1)) % 15) / 10.0 + strat_dist_mod, 2)
+        dist = max(1.8, dist) # Prevent physically impossible atomic overlap
         distances.append(dist)
         
     return base_score, energies, true_residues, interactions, distances, func_summaries
@@ -186,6 +259,7 @@ if 'pure_protein' not in st.session_state: st.session_state.pure_protein = None
 if 'smiles' not in st.session_state: st.session_state.smiles = ""
 if 'ligand_props' not in st.session_state: st.session_state.ligand_props = None
 if 'topology_data' not in st.session_state: st.session_state.topology_data = None
+if 'topology_graph' not in st.session_state: st.session_state.topology_graph = None
 
 # --- Main Dashboard Header ---
 st.title("🧬 Multi-Phase In Silico Docking Workspace")
@@ -209,6 +283,7 @@ with col1:
             if raw_text:
                 st.session_state.pdb_text = raw_text
                 st.session_state.topology_data = parse_2d_topology(raw_text)
+                st.session_state.topology_graph = generate_topology_graph(raw_text)
                 
                 # Convert to "Pure Protein" (Strip HETATMs)
                 parser = PDBParser(QUIET=True)
@@ -249,6 +324,13 @@ if st.session_state.pdb_text:
         if st.session_state.topology_data:
             topo_df = pd.DataFrame(st.session_state.topology_data.items(), columns=["Structural Feature", "Value"])
             st.dataframe(topo_df, use_container_width=True, hide_index=True)
+            
+        st.subheader("2D Structural Diagram")
+        if st.session_state.topology_graph:
+            # Renders the Graphviz directional node structure dynamically
+            st.graphviz_chart(st.session_state.topology_graph)
+        else:
+            st.info("No secondary structures configured to display.")
             
         st.subheader("Isolated Co-factors & Heteroatoms")
         het_df = parse_heteroatoms(st.session_state.pdb_text)
@@ -348,8 +430,9 @@ else:
         st.success("Docking calculation runs resolved completely!")
         
         # --- CALCULATE DYNAMIC RESULTS ON EXECUTION ---
+        # We now pass `grid_strategy` into the function so it changes the generated scores/residues
         top_score, pose_energies, active_res, int_types, dists, summaries = calculate_simulation_docking(
-            pdb_id, st.session_state.smiles, st.session_state.pdb_text, st.session_state.ligand_props
+            pdb_id, st.session_state.smiles, st.session_state.pdb_text, st.session_state.ligand_props, grid_strategy
         )
         
         # Evaluate Lipinski Compliance Dynamically
@@ -403,7 +486,7 @@ else:
             
             st.subheader("Simulation Final Summary")
             summary_metrics = {
-                "Parameter Setting": ["Target System Identifier", "Grid Volumetric Center", "Total Iteration Runtime", "Lipinski Compliant Ligand"],
-                "Value Profile": [f"PDB: {pdb_id.upper()}", f"[{center_x}, {center_y}, {center_z}]", f"{runtime} Seconds", lipinski_status]
+                "Parameter Setting": ["Target System Identifier", "Grid Strategy", "Total Iteration Runtime", "Lipinski Compliant Ligand"],
+                "Value Profile": [f"PDB: {pdb_id.upper()}", grid_strategy.split(" (")[0], f"{runtime} Seconds", lipinski_status]
             }
             st.table(pd.DataFrame(summary_metrics))
